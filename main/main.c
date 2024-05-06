@@ -23,6 +23,7 @@ static char manufname[] = {9, 'E', 's', 'p', 'r', 'e', 's', 's', 'i', 'f'};
 #define SB_ADC_CHANNEL ADC_CHANNEL_6
 #define SB_ADC_ATTEN   ADC_ATTEN_DB_12
 
+// #define INDEPENDENT_SWITCHES
 #define BUTTON_1        (1<<0) // Light
 #define BUTTON_2        (1<<1) // Ridiculous
 #define BUTTON_3        (1<<2) // Ludicrous
@@ -109,9 +110,13 @@ static void on_off_state_handler(uint8_t button_state)
         } else {
             // Keep all previous buttons on for the pot
             if (button_state & (1 << endpoint_id)) {
+#ifndef INDEPENDENT_SWITCHES
                 for (int i = endpoint_id; i >= 0; i--) {
                     button_attrs[i] = 1;
                 }
+#else
+                button_attrs[endpoint_id] = 1;
+#endif
             } else {
                 button_attrs[endpoint_id] = 0;
             }

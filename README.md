@@ -13,6 +13,9 @@ Requires ESP32-C6 and ESP-IDF 5.2. Tested with WeAct Studio ESP32-C6-MINI.
 Connect POT 1 to 3.3 VCC, POT 2 to pin 8, POT 3 to GND. Connect GO button to 3.3 VCC
 and pin 20.
 
+If you want to change the behavior so switches 1-4 are toggled independently, uncomment
+`#define INDEPENDENT_SWITCHES`.
+
 ## Resetting device
 
 Jumper 3V3 to pin 23 and reset the device.
