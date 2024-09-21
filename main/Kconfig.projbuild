@@ -1,0 +1,20 @@
+menu "Spaceballs Configuration"
+
+    config SPACEBALLS_INDEPENDENT_SWITCHES
+        bool "Use independent switches"
+        default n
+        help
+            Use independent switches instead of toggling all previous ones.
+
+    config SPACEBALLS_ADDITIONAL_SWITCH
+        bool "Add one additional switch"
+        default n
+        help
+            Additional switch.
+
+    config SPACEBALLS_ADDITIONAL_SWITCH_GPIO
+        int "GPIO for additional switch"
+        default 21
+        help
+            Additional switch GPIO
+        

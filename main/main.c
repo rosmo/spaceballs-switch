@@ -23,12 +23,13 @@ static char manufname[] = {9, 'E', 's', 'p', 'r', 'e', 's', 's', 'i', 'f'};
 #define SB_ADC_CHANNEL ADC_CHANNEL_6
 #define SB_ADC_ATTEN   ADC_ATTEN_DB_12
 
-// #define INDEPENDENT_SWITCHES
+#define INDEPENDENT_SWITCHES SPACEBALLS_INDEPENDENT_SWITCHES
 #define BUTTON_1        (1<<0) // Light
 #define BUTTON_2        (1<<1) // Ridiculous
 #define BUTTON_3        (1<<2) // Ludicrous
 #define BUTTON_4        (1<<3) // Plaid
 #define BUTTON_5        (1<<4) // Go
+#define BUTTON_6        (1<<5) // Additional switch
 #define BUTTON_GPIO_5   20     // Go button GPIO
 
 trigger_range trigger_ranges[] = {
@@ -58,7 +59,14 @@ trigger_range trigger_ranges[] = {
     },
 };
 
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+#define TOTAL_BUTTONS           ((sizeof(trigger_ranges) / sizeof(trigger_range)) + 2)
+#define GO_BUTTON_NUM           TOTAL_BUTTONS - 2
+#define ADDITIONAL_BUTTON_NUM   TOTAL_BUTTONS - 1
+#else
 #define TOTAL_BUTTONS   ((sizeof(trigger_ranges) / sizeof(trigger_range)) + 1)
+#define GO_BUTTON_NUM           TOTAL_BUTTONS - 1
+#endif
 
 // Internal button state
 static uint8_t button_state = 0, previous_state = 0;
@@ -105,12 +113,18 @@ static void on_off_state_handler(uint8_t button_state)
     // but I'm not sure which signal is the best
     for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
         // Handle go button
-        if (endpoint_id == (TOTAL_BUTTONS - 1)) {
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+        if (endpoint_id == ADDITIONAL_BUTTON_NUM) {
+            button_attrs[endpoint_id] = button_state & (1 << endpoint_id) ? 1 : 0;
+            continue;
+        }
+#endif
+        if (endpoint_id == GO_BUTTON_NUM) {
             button_attrs[endpoint_id] = button_state & (1 << endpoint_id) ? 1 : 0;
         } else {
             // Keep all previous buttons on for the pot
             if (button_state & (1 << endpoint_id)) {
-#ifndef INDEPENDENT_SWITCHES
+#if INDEPENDENT_SWITCHES
                 for (int i = endpoint_id; i >= 0; i--) {
                     button_attrs[i] = 1;
                 }
@@ -183,6 +197,15 @@ static void esp_controls_task(void *pvParameters)
         ESP_LOGI(TAG, "GO button is OFF");
     }
 
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+        button_state |= BUTTON_6;
+        ESP_LOGI(TAG, "Additional button is ON! (Button state %d)", button_state);
+    } else {
+        ESP_LOGI(TAG, "Additional button is OFF");
+    }
+#endif
+
     ESP_LOGI(TAG, "Initializing ADC, bits=%d, channel=%d, atten=%d", ADC_BITWIDTH_DEFAULT, SB_ADC_CHANNEL, SB_ADC_ATTEN);
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
 
@@ -208,10 +231,21 @@ static void esp_controls_task(void *pvParameters)
     for (int i = 0; i < sizeof(trigger_ranges) / sizeof(trigger_range); i++) {
         if (data >= trigger_ranges[i].min && data <= trigger_ranges[i].max) {
             button_state |= trigger_ranges[i].button;
-            ESP_LOGI(TAG, "Initial button state is: %s", trigger_ranges[i].name);
         }
     }
 
+    if (gpio_get_level(BUTTON_GPIO_5) == 1) {
+            button_state |= BUTTON_5;
+    }
+
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+        button_state |= BUTTON_6;
+    }
+#endif
+
+    ESP_LOGI(TAG, "Initial button state is: %s", trigger_ranges[i].name);
+    
     while (1) {
         if (button_state != previous_state) {
             ESP_LOGI(TAG, "Button state changed to %d.", button_state);
@@ -226,6 +260,14 @@ static void esp_controls_task(void *pvParameters)
         } else {
             button_state = button_state & ~(BUTTON_5);
         }
+
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+        if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+            button_state |= BUTTON_6;
+        } else {
+            button_state = button_state & ~(BUTTON_6);
+        }
+#endif
 
         for (int i = 0; i < sizeof(trigger_ranges) / sizeof(trigger_range); i++) {
             if (data >= trigger_ranges[i].min && data <= trigger_ranges[i].max) {
