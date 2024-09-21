@@ -244,7 +244,7 @@ static void esp_controls_task(void *pvParameters)
     }
 #endif
 
-    ESP_LOGI(TAG, "Initial button state is: %s", trigger_ranges[i].name);
+    ESP_LOGI(TAG, "Initial button state is: %d", button_state);
     
     while (1) {
         if (button_state != previous_state) {
@@ -549,7 +549,7 @@ static void esp_zb_task(void *pvParameters)
 
     check_reset_gpio();
 
-    esp_zb_main_loop_iteration();
+    esp_zb_stack_main_loop();
 }
 
 // Main function
