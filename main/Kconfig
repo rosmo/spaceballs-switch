@@ -17,4 +17,5 @@ menu "Spaceballs Configuration"
         default 21
         help
             Additional switch GPIO
-        
+
+endmenu
