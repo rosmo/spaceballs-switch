@@ -18,42 +18,53 @@ static const char *TAG = "ESP_ZB_SPACEBALLS";
 static char modelid[] = {24, 'S', 'p', 'a', 'c', 'e', 'b', 'a', 'l', 'l', 's', ' ', '-', ' ', 'T', 'h', 'e', ' ', 'S', 'w', 'i', 't', 'c', 'h', '!'};
 static char manufname[] = {9, 'E', 's', 'p', 'r', 'e', 's', 's', 'i', 'f'};
 
-#define RESET_GPIO_PIN 23
+#define RESET_GPIO_PIN CONFIG_SPACEBALLS_RESET_GPIO
 
-#define SB_ADC_CHANNEL ADC_CHANNEL_6
+#define SB_ADC_CHANNEL CONFIG_SPACEBALLS_POTENTIOMETER_ADC_CHANNEL
 #define SB_ADC_ATTEN   ADC_ATTEN_DB_12
 
-#define INDEPENDENT_SWITCHES SPACEBALLS_INDEPENDENT_SWITCHES
+#if SPACEBALLS_INDEPENDENT_SWITCHES
+#define INDEPENDENT_SWITCHES 
+#endif
+
 #define BUTTON_1        (1<<0) // Light
 #define BUTTON_2        (1<<1) // Ridiculous
 #define BUTTON_3        (1<<2) // Ludicrous
 #define BUTTON_4        (1<<3) // Plaid
 #define BUTTON_5        (1<<4) // Go
 #define BUTTON_6        (1<<5) // Additional switch
-#define BUTTON_GPIO_5   20     // Go button GPIO
+#define BUTTON_GPIO_5   CONFIG_SPACEBALLS_GO_GPIO     // Go button GPIO
 
 trigger_range trigger_ranges[] = {
     {
-        .min = 2600,
-        .max = 3200,
+        //.min = 2600,
+        //.max = 3200,
+        .min = 480,
+        .max = 800,
         .button = BUTTON_1, // Light
         .name = "Light",
     },
     {
-        .min = 2100,
-        .max = 2599,
+        //.min = 2100,
+        //.max = 2599,
+        .min = 801,
+        .max = 1200,
         .button = BUTTON_2, // Ridiculous
         .name = "Ridiculous",
     },
     {
-        .min = 1200,
-        .max = 2099,
+        //.min = 1200,
+        //.max = 2099,
+        .min = 1201,
+        .max = 1700, 
         .button = BUTTON_3, // Ludicrous
         .name = "Ludicrous",
     },
     {
-        .min = 0,
-        .max = 1199,
+        //.min = 0,
+        //.max = 1199,
+        .min = 1701,
+        .max = 4095,
         .button = BUTTON_4, // Plaid
         .name = "Plaid",
     },
@@ -124,7 +135,7 @@ static void on_off_state_handler(uint8_t button_state)
         } else {
             // Keep all previous buttons on for the pot
             if (button_state & (1 << endpoint_id)) {
-#if INDEPENDENT_SWITCHES
+#ifndef INDEPENDENT_SWITCHES
                 for (int i = endpoint_id; i >= 0; i--) {
                     button_attrs[i] = 1;
                 }
@@ -140,7 +151,7 @@ static void on_off_state_handler(uint8_t button_state)
     // Update endpoint on/off attributes
     esp_zb_lock_acquire(portMAX_DELAY);
     for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
-        ESP_LOGI(TAG, "Endpoint %d, on/off status: %d", endpoint_id + 1, button_attrs[endpoint_id]);
+        // ESP_LOGI(TAG, "Endpoint %d, on/off status: %d", endpoint_id + 1, button_attrs[endpoint_id]);
         if (button_attrs_previous[endpoint_id] != button_attrs[endpoint_id]) {
             esp_zb_zcl_status_t state = esp_zb_zcl_set_attribute_val(endpoint_id + 1,
                                                                      ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
@@ -151,6 +162,8 @@ static void on_off_state_handler(uint8_t button_state)
 
             if (state != ESP_ZB_ZCL_STATUS_SUCCESS) {
                 ESP_LOGE(TAG, "Failed to update on/off status for endpoint %d!", endpoint_id + 1);
+            } else {
+                ESP_LOGI(TAG, "Updated endpoint %d on/off value", endpoint_id + 1);
             }
         }
     }
@@ -198,6 +211,15 @@ static void esp_controls_task(void *pvParameters)
     }
 
 #if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+    ESP_LOGI(TAG, "Initializing additional switch GPIO %d", CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
+    gpio_config_t addt_io_conf = {};
+    addt_io_conf.intr_type = GPIO_INTR_DISABLE;
+    addt_io_conf.mode = GPIO_MODE_INPUT;
+    addt_io_conf.pin_bit_mask = (1ULL << CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
+    addt_io_conf.pull_down_en = 1;
+    addt_io_conf.pull_up_en = 0;
+    ESP_ERROR_CHECK(gpio_config(&addt_io_conf));
+
     if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
         button_state |= BUTTON_6;
         ESP_LOGI(TAG, "Additional button is ON! (Button state %d)", button_state);
@@ -246,6 +268,7 @@ static void esp_controls_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Initial button state is: %d", button_state);
     
+    int loop = 0;
     while (1) {
         if (button_state != previous_state) {
             ESP_LOGI(TAG, "Button state changed to %d.", button_state);
@@ -254,25 +277,47 @@ static void esp_controls_task(void *pvParameters)
         previous_state = button_state;
 
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, SB_ADC_CHANNEL, &data));
-
+        loop += 1;
+        if (loop > 10) {
+            ESP_LOGI(TAG, "ADC reading is: %d", data);
+            loop = 0;
+        }
         if (gpio_get_level(BUTTON_GPIO_5) == 1) {
+            if (!(button_state & BUTTON_5)) {
+                ESP_LOGI(TAG, "GO button turned on! (GPIO %d)", BUTTON_GPIO_5);
+            }
             button_state |= BUTTON_5;
         } else {
+            if (button_state & BUTTON_5) {
+                ESP_LOGI(TAG, "GO button turned off!");
+            }
             button_state = button_state & ~(BUTTON_5);
         }
 
 #if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
         if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+            if (!(button_state & BUTTON_6)) {
+                ESP_LOGI(TAG, "Additional button turned on! (GPIO %d)", CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
+            }
             button_state |= BUTTON_6;
         } else {
+            if (button_state & BUTTON_6) {
+                ESP_LOGI(TAG, "Additional button turned off!");
+            }
             button_state = button_state & ~(BUTTON_6);
         }
 #endif
 
         for (int i = 0; i < sizeof(trigger_ranges) / sizeof(trigger_range); i++) {
             if (data >= trigger_ranges[i].min && data <= trigger_ranges[i].max) {
+                if (!(button_state & trigger_ranges[i].button)) {
+                    ESP_LOGI(TAG, "Button %d turned on, data is: %d", i, data);
+                }
                 button_state |= trigger_ranges[i].button;
             } else {
+                if (button_state & trigger_ranges[i].button) {
+                    ESP_LOGI(TAG, "Button %d turned off, data is: %d", i, data);
+                }
                 button_state = button_state & ~(trigger_ranges[i].button);
             }
         }
@@ -546,6 +591,17 @@ static void esp_zb_task(void *pvParameters)
     // esp_zb_set_secondary_network_channel_set(ESP_ZB_SECONDARY_CHANNEL_MASK);
 
     ESP_ERROR_CHECK(esp_zb_start(true));
+
+#ifdef INDEPENDENT_SWITCHES
+    ESP_LOGI(TAG, "Using independent switches!");
+#else
+    ESP_LOGI(TAG, "Not using independent switches.");
+#endif
+#if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
+    ESP_LOGI(TAG, "Using additional switch at GPIO %d", CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
+#else
+    ESP_LOGI(TAG, "No additional button.");
+#endif
 
     check_reset_gpio();
 

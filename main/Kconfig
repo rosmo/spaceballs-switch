@@ -14,8 +14,27 @@ menu "Spaceballs Configuration"
 
     config SPACEBALLS_ADDITIONAL_SWITCH_GPIO
         int "GPIO for additional switch"
-        default 21
+        default 19
         help
             Additional switch GPIO
+    
+    config SPACEBALLS_POTENTIOMETER_ADC_CHANNEL
+        int "ADC for potentiometer"
+        default 6
+        help
+            ADC channel (1-6): channels maps to same number GPIO
+
+    config SPACEBALLS_GO_GPIO
+        int "GPIO for go switch"
+        default 16
+        help
+            Switch go switch GPIO
+
+    config SPACEBALLS_RESET_GPIO
+        int "GPIO for factory reset switch"
+        default 7
+        help
+            Controller reset GPIO
+
 
 endmenu
