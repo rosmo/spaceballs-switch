@@ -6,6 +6,12 @@ menu "Spaceballs Configuration"
         help
             Use independent switches instead of toggling all previous ones.
 
+    config SPACEBALLS_BUTTON_PULLUP
+        bool "Pull-up resistor on"
+        default y
+        help
+            Use GND for buttons (pins held high).
+
     config SPACEBALLS_ADDITIONAL_SWITCH
         bool "Add one additional switch"
         default n
@@ -14,27 +20,26 @@ menu "Spaceballs Configuration"
 
     config SPACEBALLS_ADDITIONAL_SWITCH_GPIO
         int "GPIO for additional switch"
-        default 19
+        default 21
         help
             Additional switch GPIO
     
     config SPACEBALLS_POTENTIOMETER_ADC_CHANNEL
         int "ADC for potentiometer"
-        default 6
+        default 5
         help
             ADC channel (1-6): channels maps to same number GPIO
 
     config SPACEBALLS_GO_GPIO
         int "GPIO for go switch"
-        default 16
+        default 20
         help
             Switch go switch GPIO
 
     config SPACEBALLS_RESET_GPIO
         int "GPIO for factory reset switch"
-        default 7
+        default 17
         help
             Controller reset GPIO
-
 
 endmenu

@@ -10,8 +10,8 @@ Requires ESP32-C6 and ESP-IDF 5.2. Tested with WeAct Studio ESP32-C6-MINI.
 
 ## Connecting hardware
 
-Connect POT 1 to 3.3 VCC, POT 2 to pin 8, POT 3 to GND. Connect GO button to 3.3 VCC
-and pin 20.
+Connect POT 1 to 3.3 VCC, POT 2 to pin 5, POT 3 to GND. Connect GO button to GND
+and pin 20. Additional switch goes to pin 21 (and GND). Optional reset switch is at pin 17.
 
 If you want to change the behavior so switches 1-4 are toggled independently, uncomment
 `#define INDEPENDENT_SWITCHES`.

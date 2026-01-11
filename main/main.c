@@ -18,6 +18,15 @@ static const char *TAG = "ESP_ZB_SPACEBALLS";
 static char modelid[] = {24, 'S', 'p', 'a', 'c', 'e', 'b', 'a', 'l', 'l', 's', ' ', '-', ' ', 'T', 'h', 'e', ' ', 'S', 'w', 'i', 't', 'c', 'h', '!'};
 static char manufname[] = {9, 'E', 's', 'p', 'r', 'e', 's', 's', 'i', 'f'};
 
+#if CONFIG_SPACEBALLS_BUTTON_PULLUP
+#define BUTTON_PRESSED 0
+#else
+#define BUTTON_PRESSED 1
+#endif
+
+#define BUTTON_DEBUG 1
+#define ADC_DEBUG 1
+
 #define RESET_GPIO_PIN CONFIG_SPACEBALLS_RESET_GPIO
 
 #define SB_ADC_CHANNEL CONFIG_SPACEBALLS_POTENTIOMETER_ADC_CHANNEL
@@ -39,7 +48,7 @@ trigger_range trigger_ranges[] = {
     {
         //.min = 2600,
         //.max = 3200,
-        .min = 480,
+        .min = 400,
         .max = 800,
         .button = BUTTON_1, // Light
         .name = "Light",
@@ -47,7 +56,7 @@ trigger_range trigger_ranges[] = {
     {
         //.min = 2100,
         //.max = 2599,
-        .min = 801,
+        .min = 800,
         .max = 1200,
         .button = BUTTON_2, // Ridiculous
         .name = "Ridiculous",
@@ -55,7 +64,7 @@ trigger_range trigger_ranges[] = {
     {
         //.min = 1200,
         //.max = 2099,
-        .min = 1201,
+        .min = 1000,
         .max = 1700, 
         .button = BUTTON_3, // Ludicrous
         .name = "Ludicrous",
@@ -63,7 +72,7 @@ trigger_range trigger_ranges[] = {
     {
         //.min = 0,
         //.max = 1199,
-        .min = 1701,
+        .min = 1500,
         .max = 4095,
         .button = BUTTON_4, // Plaid
         .name = "Plaid",
@@ -85,21 +94,75 @@ static uint8_t button_attrs[TOTAL_BUTTONS];
 static uint8_t button_attrs_previous[TOTAL_BUTTONS];
 static bool zigbee_initialized = false;
 
+static nvs_handle_t nvs;
+static float_t adc_reading = 0;
+
+static SemaphoreHandle_t update_sem;
+
+esp_err_t load_min_max_values(nvs_handle_t handle) 
+{
+    char key[32] = { '\0' };
+    esp_err_t err;
+    int16_t val;
+
+    for (int i = 0; i < TOTAL_BUTTONS; i++) {
+        // min value
+        snprintf(key, 32, "min_%d", i);
+        err = nvs_get_i16(handle, key, &val);
+        if (err != ESP_OK) {
+            return err;
+        }
+        trigger_ranges[i].min = (int)val;
+
+        // max value
+        snprintf(key, 32, "max_%d", i);
+        err = nvs_get_i16(handle, key, &val);
+        if (err != ESP_OK) {
+            return err;
+        }
+        trigger_ranges[i].max = (int)val;
+    }
+    return ESP_OK;
+}
+
+esp_err_t save_min_max_values(nvs_handle_t handle) 
+{
+    char key[32] = { '\0' };
+    esp_err_t err;
+    for (int i = 0; i < TOTAL_BUTTONS; i++) {
+        // min value
+        snprintf(key, 32, "min_%d", i);
+        err = nvs_set_i16(handle, key, (int16_t)trigger_ranges[i].min);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        // max value
+        snprintf(key, 32, "max_%d", i);
+        err = nvs_set_i16(handle, key, (int16_t)trigger_ranges[i].max);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 // Send updates of attribute changes
 static void send_reports(uint8_t force_report)
 {
     // Report status of the switches
     // Technically attribute reporting should take care of this, but to minimize
     // latency, we're just sending the updates ourselves.
+#if 0
     esp_zb_lock_acquire(portMAX_DELAY);
     for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
-        if (force_report || button_attrs_previous[endpoint_id] != button_attrs[endpoint_id]) {
+        if (zigbee_initialized && (force_report || button_attrs_previous[endpoint_id] != button_attrs[endpoint_id])) {
             esp_zb_zcl_report_attr_cmd_t report_attr_cmd;
 
             ESP_LOGI(TAG, "Reporting status change for endpoint ID %d\n", endpoint_id + 1);
             report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT;
             report_attr_cmd.attributeID = ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID;
-            report_attr_cmd.cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE;
+            report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV;
             report_attr_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ON_OFF;
             report_attr_cmd.zcl_basic_cmd.src_endpoint = endpoint_id + 1;
 
@@ -111,7 +174,7 @@ static void send_reports(uint8_t force_report)
         }
     }
     esp_zb_lock_release();
-
+#endif
     for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
         button_attrs_previous[endpoint_id] = button_attrs[endpoint_id];
     }
@@ -120,8 +183,14 @@ static void send_reports(uint8_t force_report)
 // This function updates the state of the switches in the on/off clusters
 static void on_off_state_handler(uint8_t button_state)
 {
+     if (xSemaphoreTake(update_sem, pdMS_TO_TICKS(250)) == pdFALSE) {
+        ESP_LOGE(TAG, "Failed to claim semaphore...");
+        return;
+     }
+
     // Just wait until endpoints are initialized - probably not the best way
     // but I'm not sure which signal is the best
+    ESP_LOGI(TAG, "Updating Zigbee cluster values, button state=%d, ADC=%f", button_state, adc_reading);
     for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
         // Handle go button
 #if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
@@ -149,35 +218,57 @@ static void on_off_state_handler(uint8_t button_state)
     }
 
     // Update endpoint on/off attributes
-    esp_zb_lock_acquire(portMAX_DELAY);
-    for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
-        // ESP_LOGI(TAG, "Endpoint %d, on/off status: %d", endpoint_id + 1, button_attrs[endpoint_id]);
-        if (button_attrs_previous[endpoint_id] != button_attrs[endpoint_id]) {
-            esp_zb_zcl_status_t state = esp_zb_zcl_set_attribute_val(endpoint_id + 1,
-                                                                     ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-                                                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                                                     ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-                                                                     &button_attrs[endpoint_id],
-                                                                     false);
+    if (zigbee_initialized) {
+        esp_zb_lock_acquire(portMAX_DELAY);
+        for (int endpoint_id = 0; endpoint_id < TOTAL_BUTTONS; endpoint_id++) {
+            // ESP_LOGI(TAG, "Endpoint %d, on/off status: %d", endpoint_id + 1, button_attrs[endpoint_id]);
+            if (button_attrs_previous[endpoint_id] != button_attrs[endpoint_id]) {
+                esp_zb_zcl_status_t state = esp_zb_zcl_set_attribute_val(endpoint_id + 1,
+                                                                        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                                                                        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                                        ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+                                                                        &button_attrs[endpoint_id],
+                                                                        false);
 
-            if (state != ESP_ZB_ZCL_STATUS_SUCCESS) {
-                ESP_LOGE(TAG, "Failed to update on/off status for endpoint %d!", endpoint_id + 1);
-            } else {
-                ESP_LOGI(TAG, "Updated endpoint %d on/off value", endpoint_id + 1);
+                if (state != ESP_ZB_ZCL_STATUS_SUCCESS) {
+                    ESP_LOGE(TAG, "Failed to update on/off status for endpoint %d!", endpoint_id + 1);
+                } else {
+                    // ESP_LOGI(TAG, "Updated endpoint %d on/off value", endpoint_id + 1);
+                }
             }
         }
+        // Set ADC reading
+        esp_zb_zcl_status_t state = esp_zb_zcl_set_attribute_val(1,
+                                                                 ESP_ZB_ZCL_CLUSTER_ID_ANALOG_INPUT,
+                                                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                                 ESP_ZB_ZCL_ATTR_ANALOG_INPUT_PRESENT_VALUE_ID,
+                                                                 &adc_reading,
+                                                                 false);
+
+        if (state != ESP_ZB_ZCL_STATUS_SUCCESS) {
+            ESP_LOGE(TAG, "Failed to update ADC reading!");
+        } else {
+            ESP_LOGI(TAG, "ADC reading set to: %f", adc_reading);
+        }
+
+        esp_zb_lock_release();
+    } else {
+        ESP_LOGW(TAG, "Zigbee not initialized...");
     }
-    esp_zb_lock_release();
 
     if (zigbee_initialized) {
         send_reports((uint8_t)false);
     }
+
+    xSemaphoreGive(update_sem);
 }
 
 static void handle_button_state_change(uint8_t previous_state, uint8_t button_state)
 {
-    ESP_LOGI(TAG, "Scheduling attribute update...");
-    esp_zb_scheduler_alarm((esp_zb_callback_t)on_off_state_handler, button_state, 100);
+    if (zigbee_initialized) {
+        ESP_LOGI(TAG, "Scheduling attribute update...");
+        esp_zb_scheduler_alarm((esp_zb_callback_t)on_off_state_handler, button_state, 50);
+    }
 }
 
 // Handles the rotary potentiometer and the throw switch
@@ -199,11 +290,16 @@ static void esp_controls_task(void *pvParameters)
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << BUTTON_GPIO_5);
+#if CONFIG_SPACEBALLS_BUTTON_PULLUP
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 1;
+#else
     io_conf.pull_down_en = 1;
     io_conf.pull_up_en = 0;
+#endif
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    if (gpio_get_level(BUTTON_GPIO_5) == 1) {
+    if (gpio_get_level(BUTTON_GPIO_5) == BUTTON_PRESSED) {
         button_state |= BUTTON_5;
         ESP_LOGI(TAG, "GO button is ON! (Button state %d)", button_state);
     } else {
@@ -216,11 +312,16 @@ static void esp_controls_task(void *pvParameters)
     addt_io_conf.intr_type = GPIO_INTR_DISABLE;
     addt_io_conf.mode = GPIO_MODE_INPUT;
     addt_io_conf.pin_bit_mask = (1ULL << CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
+#if CONFIG_SPACEBALLS_BUTTON_PULLUP
+    addt_io_conf.pull_down_en = 0;
+    addt_io_conf.pull_up_en = 1;
+#else
     addt_io_conf.pull_down_en = 1;
     addt_io_conf.pull_up_en = 0;
+#endif
     ESP_ERROR_CHECK(gpio_config(&addt_io_conf));
 
-    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == BUTTON_PRESSED) {
         button_state |= BUTTON_6;
         ESP_LOGI(TAG, "Additional button is ON! (Button state %d)", button_state);
     } else {
@@ -250,18 +351,19 @@ static void esp_controls_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     data = data / 5;
+    adc_reading = ((float_t)data)/10;
     for (int i = 0; i < sizeof(trigger_ranges) / sizeof(trigger_range); i++) {
-        if (data >= trigger_ranges[i].min && data <= trigger_ranges[i].max) {
+        if (data >= trigger_ranges[i].min /* && data <= trigger_ranges[i].max*/) {
             button_state |= trigger_ranges[i].button;
         }
     }
 
-    if (gpio_get_level(BUTTON_GPIO_5) == 1) {
+    if (gpio_get_level(BUTTON_GPIO_5) == BUTTON_PRESSED) {
             button_state |= BUTTON_5;
     }
 
 #if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
-    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+    if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == BUTTON_PRESSED) {
         button_state |= BUTTON_6;
     }
 #endif
@@ -271,7 +373,9 @@ static void esp_controls_task(void *pvParameters)
     int loop = 0;
     while (1) {
         if (button_state != previous_state) {
+#if BUTTON_DEBUG
             ESP_LOGI(TAG, "Button state changed to %d.", button_state);
+#endif
             handle_button_state_change(previous_state, button_state);
         }
         previous_state = button_state;
@@ -279,10 +383,12 @@ static void esp_controls_task(void *pvParameters)
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, SB_ADC_CHANNEL, &data));
         loop += 1;
         if (loop > 10) {
+#if ADC_DEBUG
             ESP_LOGI(TAG, "ADC reading is: %d", data);
+#endif
             loop = 0;
         }
-        if (gpio_get_level(BUTTON_GPIO_5) == 1) {
+        if (gpio_get_level(BUTTON_GPIO_5) == BUTTON_PRESSED) {
             if (!(button_state & BUTTON_5)) {
                 ESP_LOGI(TAG, "GO button turned on! (GPIO %d)", BUTTON_GPIO_5);
             }
@@ -295,7 +401,7 @@ static void esp_controls_task(void *pvParameters)
         }
 
 #if CONFIG_SPACEBALLS_ADDITIONAL_SWITCH
-        if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == 1) {
+        if (gpio_get_level(CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO) == BUTTON_PRESSED) {
             if (!(button_state & BUTTON_6)) {
                 ESP_LOGI(TAG, "Additional button turned on! (GPIO %d)", CONFIG_SPACEBALLS_ADDITIONAL_SWITCH_GPIO);
             }
@@ -311,12 +417,16 @@ static void esp_controls_task(void *pvParameters)
         for (int i = 0; i < sizeof(trigger_ranges) / sizeof(trigger_range); i++) {
             if (data >= trigger_ranges[i].min && data <= trigger_ranges[i].max) {
                 if (!(button_state & trigger_ranges[i].button)) {
+#if BUTTON_DEBUG
                     ESP_LOGI(TAG, "Button %d turned on, data is: %d", i, data);
+#endif
                 }
                 button_state |= trigger_ranges[i].button;
             } else {
                 if (button_state & trigger_ranges[i].button) {
+#if BUTTON_DEBUG
                     ESP_LOGI(TAG, "Button %d turned off, data is: %d", i, data);
+#endif
                 }
                 button_state = button_state & ~(trigger_ranges[i].button);
             }
@@ -327,7 +437,14 @@ static void esp_controls_task(void *pvParameters)
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
 {
-    ESP_RETURN_ON_FALSE(esp_zb_bdb_start_top_level_commissioning(mode_mask) == ESP_OK,, TAG, "Failed to start Zigbee bdb commissioning");
+    esp_err_t err;
+
+    err = esp_zb_bdb_start_top_level_commissioning(mode_mask);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Started top level commissioning.");
+    } else {
+        ESP_LOGE(TAG, "Failed to start top level commissioning: %s", esp_err_to_name(err));
+    }
 }
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
@@ -337,6 +454,11 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     esp_zb_app_signal_type_t sig_type = *p_sg_p;
     esp_zb_zdo_signal_leave_params_t *leave_params = NULL;
     esp_zb_zdo_signal_device_annce_params_t *dev_annce_params = NULL;
+
+    if (xSemaphoreTake(update_sem, pdMS_TO_TICKS(1000)) == pdFALSE) {
+        ESP_LOGE(TAG, "Failed to claim semaphore in signal handler...");
+        return;
+    }
 
     switch (sig_type) {
     case ESP_ZB_BDB_SIGNAL_FINDING_AND_BINDING_TARGET_FINISHED:
@@ -376,9 +498,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "Device rebooted");
-                // Just send an update, in case coordinator is out of sync
                 zigbee_initialized = true;
-                esp_zb_scheduler_alarm((esp_zb_callback_t)send_reports, (uint8_t)true, 1000);
+
+                // Just send an update, in case coordinator is out of sync
+                // esp_zb_scheduler_alarm((esp_zb_callback_t)send_reports, (uint8_t)true, 1000);
             }
         }
         break;
@@ -387,10 +510,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         ESP_LOGI(TAG, "New device commissioned or rejoined (short: 0x%04hx)", dev_annce_params->device_short_addr);
         break;
     case ESP_ZB_BDB_SIGNAL_STEERING:
-        if (err_status == ESP_OK) {
-            ESP_LOGI(TAG, "Network steering started");
-        }
-        break;
     case ESP_ZB_BDB_SIGNAL_FORMATION:
         if (err_status == ESP_OK) {
             esp_zb_ieee_addr_t extended_pan_id;
@@ -401,7 +520,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
             zigbee_initialized = true;
             esp_zb_scheduler_alarm((esp_zb_callback_t)send_reports, (uint8_t)true, 1000);
-
         } else {
             ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
@@ -416,10 +534,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             }
         }
         break;
+    case ESP_ZB_NLME_STATUS_INDICATION:
+        if (err_status == ESP_OK) {
+            zigbee_initialized = true;
+        } else {
+            ESP_LOGE(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
+
+        }
+        break;
     default:
         ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s", esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
         break;
     }
+    xSemaphoreGive(update_sem);
 }
 
 static esp_err_t zb_attribute_reporting_handler(const esp_zb_zcl_report_attr_message_t *message)
@@ -463,8 +590,31 @@ static esp_err_t zb_configure_report_resp_handler(const esp_zb_zcl_cmd_config_re
 // This is just an informational function
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
+    if (xSemaphoreTake(update_sem, pdMS_TO_TICKS(1000)) == pdFALSE) {
+        ESP_LOGE(TAG, "Failed to claim semaphore in callback...");
+        return ESP_FAIL;
+    }
+
     esp_err_t ret = ESP_OK;
     switch (callback_id) {
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        esp_zb_zcl_set_attr_value_message_t *set_attr = (esp_zb_zcl_set_attr_value_message_t *)message;
+        float_t *f_new_value;
+
+        ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback: set attr", callback_id);
+        ESP_LOGI(TAG, "status=%d, dst endpoint=%d, cluster=%d", set_attr->info.status, set_attr->info.dst_endpoint, set_attr->info.cluster);
+        ESP_LOGI(TAG, "attribute id=%d, type=%d, size=%d", set_attr->attribute.id, set_attr->attribute.data.type, set_attr->attribute.data.size);
+        if (set_attr->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_SINGLE) {
+            f_new_value = (float_t *)set_attr->attribute.data.value;
+            ESP_LOGI(TAG, "new value=%f", *f_new_value);
+            if ((set_attr->info.dst_endpoint - 1) < TOTAL_BUTTONS) {
+                trigger_ranges[set_attr->info.dst_endpoint-1].min = ((int)*f_new_value)*10;
+                ESP_LOGI(TAG, "New minimum trigger value for %d is %d", set_attr->info.dst_endpoint-1,  trigger_ranges[set_attr->info.dst_endpoint-1].min);
+                save_min_max_values(nvs);
+            }
+        }
+        ret = zb_attribute_reporting_handler((esp_zb_zcl_report_attr_message_t *)message);
+        break;
     case ESP_ZB_CORE_REPORT_ATTR_CB_ID:
         ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback: report attr", callback_id);
         ret = zb_attribute_reporting_handler((esp_zb_zcl_report_attr_message_t *)message);
@@ -477,10 +627,14 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback: config response", callback_id);
         ret = zb_configure_report_resp_handler((esp_zb_zcl_cmd_config_report_resp_message_t *)message);
         break;
+    case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
+        ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback: default response", callback_id);
+        break;
     default:
         ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);
         break;
     }
+    xSemaphoreGive(update_sem);
     return ret;
 }
 
@@ -492,13 +646,18 @@ void check_reset_gpio(void)
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << RESET_GPIO_PIN);
+#if CONFIG_SPACEBALLS_BUTTON_PULLUP
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 1;
+#else
     io_conf.pull_down_en = 1;
     io_conf.pull_up_en = 0;
+#endif
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
     for (int i = 0; i < 5; i++) {
         int level = gpio_get_level(RESET_GPIO_PIN);
-        if (level == 1) {
+        if (level == BUTTON_PRESSED) {
             ESP_LOGW(TAG, "Pin %d is high, performing factory reset...", RESET_GPIO_PIN);
             if (!esp_zb_bdb_is_factory_new()) {
                 esp_zb_factory_reset();
@@ -516,7 +675,7 @@ void check_reset_gpio(void)
 static void esp_zb_task(void *pvParameters)
 {
     /* initialize Zigbee stack */
-    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
+    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
 
     uint8_t zcl_version, null_values;
@@ -554,6 +713,28 @@ static void esp_zb_task(void *pvParameters)
         // and sent to the client device that has been bound to the server device
 
         ESP_ERROR_CHECK(esp_zb_cluster_list_add_on_off_cluster(esp_zb_cluster_list, esp_zb_on_off_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+        if (endpoint_id == 0) {
+            ESP_LOGI(TAG, "Adding ADC reading cluster");
+            // ADC reading
+            esp_zb_analog_input_cluster_cfg_t analog_input;
+            analog_input.out_of_service = false;
+            analog_input.present_value = (float_t)adc_reading;
+            analog_input.status_flags = ESP_ZB_ZCL_ANALOG_INPUT_STATUS_FLAG_NORMAL;
+            esp_zb_attribute_list_t *analog_input_cluster = esp_zb_analog_input_cluster_create(&analog_input);
+            ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_input_cluster(esp_zb_cluster_list, analog_input_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));    
+        }
+
+        if (endpoint_id < GO_BUTTON_NUM) { 
+            ESP_LOGI(TAG, "Adding minimum value analog output cluster at: %d", trigger_ranges[endpoint_id].min);
+            // ADC minimum value
+            esp_zb_analog_output_cluster_cfg_t min_analog_output;
+            min_analog_output.out_of_service = false;
+            min_analog_output.present_value = (float_t)(trigger_ranges[endpoint_id].min/10);
+            min_analog_output.status_flags = ESP_ZB_ZCL_ANALOG_OUTPUT_STATUS_FLAG_NORMAL;
+            esp_zb_attribute_list_t *min_analog_output_cluster = esp_zb_analog_output_cluster_create(&min_analog_output);
+            ESP_ERROR_CHECK(esp_zb_cluster_list_add_analog_output_cluster(esp_zb_cluster_list, min_analog_output_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+        }
 
         esp_zb_endpoint_config_t endpoint_cfg = {
             .endpoint = (endpoint_id + 1),
@@ -611,6 +792,7 @@ static void esp_zb_task(void *pvParameters)
 // Main function
 void app_main(void)
 {
+    esp_err_t err;
     esp_zb_platform_config_t config = {
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
@@ -621,9 +803,26 @@ void app_main(void)
     ESP_LOGI(TAG, "Zigbee MAC: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x", ieeeMac[0], ieeeMac[1], ieeeMac[2], ieeeMac[3], ieeeMac[4], ieeeMac[5], ieeeMac[6], ieeeMac[7]);
 
     ESP_LOGI(TAG, "nvs_flash_init()");
-    ESP_ERROR_CHECK(nvs_flash_init());
+    err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    err = nvs_open("storage", NVS_READWRITE, &nvs);
+    ESP_ERROR_CHECK(err);
+
+    ESP_LOGI(TAG, "Loading ADC values from NVS...");
+    err = load_min_max_values(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No values in NVS, storing default values.");
+        ESP_ERROR_CHECK(save_min_max_values(nvs));
+    }
 
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
+    update_sem = xSemaphoreCreateMutex();
+    assert(update_sem != NULL);
 
     xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
     xTaskCreate(esp_controls_task, "Controls", 4096, NULL, 5, NULL);
